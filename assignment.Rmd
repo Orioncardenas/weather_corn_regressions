@@ -1,6 +1,6 @@
 ---
 title: "Weather and Corn Yield Regressions"
-author: "Nathan Mueller"
+author: "Orion Cardenas and Nathan Mueller"
 date: "2/25/2022"
 output: html_document
 ---
@@ -10,6 +10,8 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(R.matlab)
 library(rnassqs)
+library(dplyr)
+library(gridExtra)
 ```
 
 ## Weather Data Analysis
@@ -20,7 +22,7 @@ library(rnassqs)
 
 # daily max temperature
 # dimensions: counties x days x years
-prism <- readMat("data/prismiowa.mat")
+prism <- readMat("prismiowa.mat")
 
 # look at county #1
 t_1981_c1 <- prism$tmaxdaily.iowa[1,,1]
@@ -80,7 +82,7 @@ summary(lm_summertmax)
 ```{r winter temps}
 
 winnewinter <- tmaxdf %>%
-  filter(countyfp==191 & doy <= 59 | doy >= 335 & !is.na(tmax)) %>%
+  filter(countyfp==191 & (doy <= 59 | doy >= 335) & !is.na(tmax)) %>%
   group_by(year) %>%
   summarize(meantmax = mean(tmax))
 
@@ -115,10 +117,10 @@ ggplot(winnewinter) +
 
 ### Download NASS corn yield data
 
-```{r yield download}
+```{r yield download, include=FALSE}
 
 # set our API key with NASS
-nassqs_auth(key = "...")
+nassqs_auth(key = "4D18D90E-0607-33B1-9600-269C28AC265A")
 
 # parameters to query on 
 params <- list(commodity_desc = "CORN", util_practice_desc = "GRAIN", prodn_practice_desc = "ALL PRODUCTION PRACTICES", year__GE = 1981, state_alpha = "IA")
@@ -140,16 +142,241 @@ cornyields <- tibble(cornyields)
 
 ### Question 1a: Extract Winneshiek County corn yields, fit a linear time trend, make a plot. Is there a significant time trend?
 
+There is a significant trend in yield over time. Yield has increased over time and the low p values and positive intercept indicates that it is a significant positive trend.
+
+```{r}
+winne_corn_yields = cornyields %>%
+  filter(county_name == "WINNESHIEK") %>%
+  group_by(year)
+
+ggplot(winne_corn_yields, mapping = aes(x = year, y = yield)) +
+  geom_point() +
+  theme_bw() +
+  labs(x = "Year", y = "Corn Yield (Bu/Acre)") +
+  ggtitle("Yield Over Time") +
+  geom_smooth(method = lm)
+
+lm_winne_corn_yields = lm(yield ~ year, winne_corn_yields)
+
+summary(lm_winne_corn_yields)
+```
+
+
 ### Question 1b: Fit a quadratic time trend (i.e., year + year^2) and make a plot. Is there evidence for slowing yield growth? 
+
+No, there is no evidence for slowing yield growth. After fitting a quadratic time trend, there appears to be a positive quadratic trend indicating increasing growth over time.
+
+```{r}
+winne_corn_yields$yearsq = winne_corn_yields$year^2
+
+lm_wcy_quad = lm(yield ~ year + yearsq, winne_corn_yields)
+summary(lm_wcy_quad)
+winne_corn_yields$fitted = lm_wcy_quad$fitted.values
+
+ggplot(winne_corn_yields) +
+  geom_point(mapping = aes(x = year, y = yield)) +
+  geom_line(mapping = aes(x = year, y = fitted)) +
+  theme_bw() +
+  ggtitle("Quadratic Time Trend") +
+  labs(x = "Year", y = "Corn Yield (Bu/Acre)")
+
+```
+
 
 ### Question 2 -- Time Series: Let's analyze the relationship between temperature and yields for the Winneshiek County time series. Use data on yield and summer avg Tmax. Is adding year or Tmax^2 to your model helpful? Make a plot and interpret the results.
 
+Summer avg Tmax alone does not appear to be a good predictor of corn yield (p = 0.29). Adding both year and summer avg Tmax does improve the model. The model with year and avg T max had the most significant p value although the meantmax variable was not significant. The quadratic model was significant (p=0.007) and all of the variables in the model were good predictors of meantmax.
+
+```{r}
+winne_yield_summertmax = inner_join(winne_corn_yields, winnesummer)
+
+winne_yield_summertmax$meantmaxq = winne_yield_summertmax$meantmax^2
+
+lm_winne_yieldtmax = lm(yield ~ meantmax, winne_yield_summertmax)
+
+lm_winne_yieldtmaxyear = lm(yield ~ meantmax + year, winne_yield_summertmax)
+
+lm_winne_yieldtmaxq = lm(yield ~ meantmax + meantmaxq, winne_yield_summertmax)
+
+summary(lm_winne_yieldtmax)
+summary(lm_winne_yieldtmaxyear)
+summary(lm_winne_yieldtmaxq)
+
+ggplot(winne_yield_summertmax, mapping = aes(x = meantmax, y = yield)) +
+  geom_point() +
+  theme_bw() +
+  labs(x = "Mean T Max", y = "Corn Yield (BU/Acre)") +
+  ggtitle("Yield by MeanTMax") +
+  geom_smooth(method = lm)
+```
+
+
 ### Question 3 -- Cross-Section: Analyze the relationship between temperature and yield across all counties in 2018. Is there a relationship? Interpret the results.
+
+Meantmax summer is a fair predictor of corn yield across all counties (p=0.06). The model improves when adding the quadratic variable (p=0.001). Meantmax winter was not a good model (p= 0.9). The performance of the meantmax winter model was drastically improved when the quadratic variable was added (p=0.0005). The combination of meantmax summer and meantmax winter produced a good model where both variables were good predictors (p=0.0004). It was also greatly improved with the addition of the quadratic variables.
+
+```{r}
+allcounty_corn_yields_2018 = cornyields[cornyields$year == 2018,]
+allcounty_corn_yields_2018$countyfp = as.factor(allcounty_corn_yields_2018$county_ansi)
+
+allcounty_summer_2018 = tmaxdf %>%
+  filter(year == 2018 & doy >= 152 & doy <= 243) %>%
+  group_by(year, countyfp) %>%
+  summarize(meantmaxsum = mean(tmax))
+
+allcounty_winter_2018 = tmaxdf %>%
+  filter((doy <= 59) & !is.na(tmax)) %>%
+  filter(year == 2018) %>%
+  group_by(year, countyfp) %>%
+  summarize(meantmaxwin = mean(tmax))
+
+allcounty_corn_yields_2018 = left_join(allcounty_corn_yields_2018, allcounty_summer_2018, keep=F, by = "countyfp")
+
+allcounty_corn_yields_2018 = left_join(allcounty_corn_yields_2018, allcounty_winter_2018, keep=F, by = "countyfp")
+
+allcounty_corn_yields_2018$meantmaxsumq = allcounty_corn_yields_2018$meantmaxsum^2
+
+allcounty_corn_yields_2018$meantmaxwinq = allcounty_corn_yields_2018$meantmaxwin^2
+
+lm_allcy_tempyield_sum = lm(yield ~ meantmaxsum, allcounty_corn_yields_2018)
+
+lm_allcy_tempyield_sumq = lm(yield ~ meantmaxsum + meantmaxsumq, allcounty_corn_yields_2018)
+
+
+lm_allcy_tempyield_win = lm(yield ~ meantmaxwin, allcounty_corn_yields_2018)
+
+lm_allcy_tempyield_winq = lm(yield ~ meantmaxwin + meantmaxwinq, allcounty_corn_yields_2018)
+
+lm_allcy_tempyield_sumwin1 = lm(yield ~ meantmaxsum + meantmaxwin, allcounty_corn_yields_2018)
+
+lm_allcy_tempyield_sumwin2 = lm(yield ~ meantmaxsum + meantmaxwin + meantmaxsumq + meantmaxwinq, allcounty_corn_yields_2018)
+
+summary(lm_allcy_tempyield_sum)
+summary(lm_allcy_tempyield_sumq)
+summary(lm_allcy_tempyield_win)
+summary(lm_allcy_tempyield_winq)
+summary(lm_allcy_tempyield_sumwin1)
+summary(lm_allcy_tempyield_sumwin2)
+
+
+
+
+AIC(lm_allcy_tempyield_sum, lm_allcy_tempyield_sumq, lm_allcy_tempyield_win, lm_allcy_tempyield_winq, lm_allcy_tempyield_sumwin1, lm_allcy_tempyield_sumwin2)
+
+sumyieldplot2018 = ggplot(allcounty_corn_yields_2018, mapping = aes(x = meantmaxsum, y = yield)) +
+  geom_point() +
+  theme_bw() +
+  labs(x = "Summer Mean Daily Maximum Temperature", y = "Yield") +
+  ggtitle("Yield by Summer MeanTmax for All Counties in 2018") +
+  geom_smooth(method = lm)
+
+winyieldplot2018 = ggplot(allcounty_corn_yields_2018, mapping = aes(x = meantmaxwin, y = yield)) +
+  geom_point() +
+  theme_bw() +
+  labs(x = "Winter Mean Daily Maximum Temperature", y = "Yield") +
+  ggtitle("Yield by Winter MeanTmax for All Counties in 2018") +
+  geom_smooth(method = lm)
+
+grid.arrange(sumyieldplot2018,winyieldplot2018)
+```
+
 
 ### Question 4 -- Panel: One way to leverage multiple time series is to group all data into what is called a "panel" regression. Convert the county ID code ("countyfp" or "county_ansi") into factor using as.factor, then include this variable in a regression using all counties' yield and summer temperature data. How does the significance of your temperature coefficients (Tmax, Tmax^2) change? Make a plot comparing actual and fitted yields and interpret the results of your model.
 
+Including the county variable in our regression results in a strong model. The two temperature variables (Tmax and Tmax^2) are highly significant in this model (p<2.2e-16). They are better predictors of corn yield than the county variables.
+
+```{r}
+cornyields$countyfp = as.factor(cornyields$county_ansi)
+
+allcounty_summer_ay = tmaxdf %>%
+  filter(doy >= 152 & doy <= 243) %>%
+  group_by(year, countyfp) %>%
+  summarize(meantmax = mean(tmax))
+
+allcounty_cy_summertemp = inner_join(cornyields, allcounty_summer_ay, by=c("countyfp", "year")) %>%
+  na.omit(.)
+
+allcounty_cy_summertemp$meantmaxq = allcounty_cy_summertemp$meantmax^2
+
+lm_allcy_summertempyield = lm(yield ~ countyfp + meantmax + meantmaxq, allcounty_cy_summertemp)
+summary(lm_allcy_summertempyield)
+
+allcounty_cy_summertemp$fitted = lm_allcy_summertempyield$fitted.values
+
+actualvfittedplot1 = ggplot(allcounty_cy_summertemp) +
+      geom_point(mapping = aes(x = meantmax, y = yield, col="Actual")) +
+      geom_line(mapping = aes(x = meantmax, y = fitted, col="Fitted")) +
+      theme_bw() +
+      labs(x = "Average Daily Maximum Temperature (°C)", y = "Corn Yield (Bu/Acre)") +
+      ggtitle("Actual Vs Fitted Corn Values By Temperature (°C)")
+
+actualvfittedplot2 = ggplot(allcounty_cy_summertemp) +
+      geom_point(mapping = aes(x = year, y = yield, col="Actual")) +
+      geom_line(mapping = aes(x = year, y = fitted, col="Fitted")) +
+      theme_bw() +
+      labs(x = "Year", y = "Corn Yield (Bu/Acre)") +
+      ggtitle("Actual Vs Fitted Corn Values Over Time")
+grid.arrange(actualvfittedplot1, actualvfittedplot2)
+```
+
 ### Question 5 -- Soybeans: Download NASS data on soybean yields and explore either a time series relationship for a given county, the cross-sectional relationship for a given year, or a panel across all counties and years.
 
-### Bonus: Find a package to make a county map of Iowa displaying some sort of information about yields or weather. Interpret your map.
+I decided to do a panel for soybean yield across all Iowa counties and years. The model is strong overall (p < 2e-16) and the temperature variables are highly significant in this model (p < 2e-16). 
 
-### Bonus #2: Challenge question - map trends in corn yields by county across Iowa. Interpret your map.
+```{r, include = FALSE}
+
+# set our API key with NASS
+nassqs_auth(key = "4D18D90E-0607-33B1-9600-269C28AC265A")
+
+# parameters to query on 
+params = list(commodity_desc = "SOYBEANS", prodn_practice_desc = "ALL PRODUCTION PRACTICES", year__GE = 1981, state_alpha = "IA")
+
+# download
+soybeanyieldsall = nassqs_yields(params)
+
+soybeanyieldsall$county_ansi = as.numeric(soybeanyieldsall$county_ansi)
+soybeanyieldsall$yield = as.numeric(soybeanyieldsall$Value)
+
+# clean and filter this dataset
+soybeanyields = select(soybeanyieldsall, county_ansi, county_name, yield, year) %>%
+  filter(!is.na(county_ansi) & !is.na(yield))
+soybeanyields =  tibble(soybeanyields)
+```
+
+
+```{r}
+# panel study
+soybeanyields$countyfp = as.factor(soybeanyields$county_ansi)
+
+allcounty_summer_ay = tmaxdf %>%
+  filter(doy >= 152 & doy <= 243) %>%
+  group_by(year, countyfp) %>%
+  summarize(meantmax = mean(tmax))
+
+allcounty_sy_summertemp = inner_join(soybeanyields, allcounty_summer_ay, by=c("countyfp", "year")) %>%
+  na.omit(.)
+
+allcounty_sy_summertemp$meantmaxq = allcounty_sy_summertemp$meantmax^2
+
+lm_allsy_summertempyield = lm(yield ~ countyfp + meantmax + meantmaxq, allcounty_sy_summertemp)
+summary(lm_allsy_summertempyield)
+
+allcounty_sy_summertemp$fitted = lm_allsy_summertempyield$fitted.values
+
+actualvfittedplot3 = ggplot(allcounty_sy_summertemp) +
+      geom_point(mapping = aes(x = meantmax, y = yield, col="Actual")) +
+      geom_line(mapping = aes(x = meantmax, y = fitted, col="Fitted")) +
+      theme_bw() +
+      labs(x = "Average Daily Maximum Temperature (°C)", y = "Soybean Yield") +
+      ggtitle("Actual Vs Fitted Soybean Values By Temperature (°C)")
+
+actualvfittedplot4 = ggplot(allcounty_sy_summertemp) +
+      geom_point(mapping = aes(x = year, y = yield, col="Actual")) +
+      geom_line(mapping = aes(x = year, y = fitted, col="Fitted")) +
+      theme_bw() +
+      labs(x = "Year", y = "Soybean Yield") +
+      ggtitle("Actual Vs Fitted Soybean Values Over Time")
+grid.arrange(actualvfittedplot3, actualvfittedplot4)
+
+```
+
